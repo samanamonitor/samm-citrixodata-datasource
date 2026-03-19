@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"net/url"
 	"time"
+	"errors"
+	"strconv"
 
 	"github.com/samanamonitor/samm-citrixodata-datasource/pkg/plugin/odata"
 	"github.com/samanamonitor/samm-citrixodata-datasource/pkg/plugin/citrixcloud"
@@ -41,12 +43,41 @@ type DatasourceSettings struct {
 }
 
 func newDatasourceInstance(ctx context.Context, settings backend.DataSourceInstanceSettings) (instancemgmt.Instance, error) {
-	var dsSettings DatasourceSettings
+	dsSettings := DatasourceSettings{
+		URLSpaceEncoding: "%20",
+		CitrixCloudUrl: "https://api.cloud.com/monitorodata",
+		AuthUrl: "https://api.cloud.com/cctrustoauth2/root/tokens/clients",
+	}
+
+	var settingsTemp map[string]any
 	if settings.JSONData != nil && len(settings.JSONData) > 1 {
-		if err := json.Unmarshal(settings.JSONData, &dsSettings); err != nil {
+		if err := json.Unmarshal(settings.JSONData, &settingsTemp); err != nil {
 			return nil, err
 		}
 	}
+
+	if temp, found := settingsTemp["urlSpaceEncoding"]; found {
+		dsSettings.URLSpaceEncoding = temp.(string)
+	}
+
+	if temp, found := settingsTemp["citrixCloudUrl"]; found {
+		dsSettings.CitrixCloudUrl = temp.(string)
+	}
+
+	if temp, found := settingsTemp["authUrl"]; found {
+		dsSettings.AuthUrl = temp.(string)
+	}
+
+	dsSettings.ClientId, _ = settingsTemp["clientId"].(string)
+	if cid, found := settingsTemp["customerId"]; found {
+		switch temp := cid.(type) {
+		case string:
+			dsSettings.CustomerId = temp
+		case float64:
+			dsSettings.CustomerId = strconv.FormatFloat(temp, 'g', 0, 64)
+		}
+	}
+
 	config := clientcredentials.Config{
 		ClientID:       dsSettings.ClientId,
 		ClientSecret:   settings.DecryptedSecureJSONData["clientSecret"],
@@ -80,14 +111,20 @@ func NewODataSource(ctx context.Context, _ backend.DataSourceInstanceSettings) (
 }
 
 func (ds *ODataSource) getClientInstance(ctx context.Context, pluginContext backend.PluginContext) ODataClient {
-	instance, _ := ds.im.Get(ctx, pluginContext)
+	instance, err := ds.im.Get(ctx, pluginContext)
+	if err != nil {
+		log.DefaultLogger.Error("Unable to get/create client instance", "error", err)
+		return nil
+	}
 	clientInstance := instance.(*ODataSourceInstance).client
 	return clientInstance
 }
 
-func (ds *ODataSource) QueryData(ctx context.Context, req *backend.QueryDataRequest) (*backend.QueryDataResponse,
-	error) {
+func (ds *ODataSource) QueryData(ctx context.Context, req *backend.QueryDataRequest) (*backend.QueryDataResponse, error) {
 	clientInstance := ds.getClientInstance(ctx, req.PluginContext)
+	if clientInstance == nil {
+		return nil, errors.New("Instance of plugin cannot be located.")
+	}
 	response := backend.NewQueryDataResponse()
 	for _, q := range req.Queries {
 		res := ds.query(clientInstance, q)
@@ -96,11 +133,13 @@ func (ds *ODataSource) QueryData(ctx context.Context, req *backend.QueryDataRequ
 	return response, nil
 }
 
-func (ds *ODataSource) CheckHealth(ctx context.Context, req *backend.CheckHealthRequest) (*backend.CheckHealthResult,
-	error) {
+func (ds *ODataSource) CheckHealth(ctx context.Context, req *backend.CheckHealthRequest) (*backend.CheckHealthResult, error) {
 	var status backend.HealthStatus
 	var message string
 	clientInstance := ds.getClientInstance(ctx, req.PluginContext)
+	if clientInstance == nil {
+		return nil, errors.New("Instance of plugin cannot be located.")
+	}
 	var res, err = clientInstance.GetServiceRoot()
 	if err != nil {
 		status = backend.HealthStatusError
